@@ -1,0 +1,390 @@
+import os
+import subprocess
+import urllib.request
+import zipfile
+import shutil
+import stat
+from kivy.app import App
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.textinput import TextInput
+from kivy.uix.label import Label
+from kivy.uix.progressbar import ProgressBar
+from kivy.clock import Clock
+import threading
+import platform
+import sys
+import ast
+import datetime
+
+class ConverterApp(App):
+    def __init__(self):
+        super().__init__()
+        self.initialize_paths()
+        self.create_directories()
+        self.set_permissions()
+        self.system_ready = False
+        self.internet_available = False
+        self.progress_value = 0
+
+    def initialize_paths(self):
+        """Initialize basic directory paths based on the operating system."""
+        self.base_dir = os.path.join(os.path.expanduser('~'), 'python_to_apk') if platform.system() == 'Windows' else '/storage/emulated/0/python_to_apk'
+        self.sdk_dir = os.path.join(self.base_dir, 'android-sdk')
+        self.ndk_dir = os.path.join(self.base_dir, 'android-ndk')
+        self.log_dir = os.path.join(self.base_dir, 'logs')
+
+    def create_directories(self):
+        """Create necessary directories for the application."""
+        try:
+            os.makedirs(self.base_dir, exist_ok=True)
+            os.makedirs(self.sdk_dir, exist_ok=True)
+            os.makedirs(self.ndk_dir, exist_ok=True)
+            os.makedirs(self.log_dir, exist_ok=True)
+        except Exception as e:
+            print(f"Error creating directories: {e}")
+
+    def set_permissions(self):
+        """Set permissions for directories in Linux/Android."""
+        if platform.system() != 'Windows':
+            try:
+                os.chmod(self.base_dir, 0o755)
+                os.chmod(self.sdk_dir, 0o755)
+                os.chmod(self.ndk_dir, 0o755)
+                os.chmod(self.log_dir, 0o755)
+            except Exception as e:
+                print(f"Error setting permissions: {e}")
+
+    def build(self):
+        self.title = 'Enhanced Python to APK Converter'
+        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        self.add_widgets(layout)
+        return layout
+
+    def add_widgets(self, layout):
+        """Add UI elements to the layout."""
+        layout.add_widget(Label(text="Enhanced Python to APK Converter", size_hint=(1, 0.1), font_size='20sp'))
+        self.code_input = TextInput(hint_text="Enter your Python code here", size_hint=(1, 0.4), multiline=True)
+        layout.add_widget(self.code_input)
+        self.app_name_input = TextInput(hint_text="Enter the app name", size_hint=(1, 0.1), multiline=False)
+        layout.add_widget(self.app_name_input)
+        self.progress_bar = ProgressBar(max=100, size_hint=(1, 0.05))
+        layout.add_widget(self.progress_bar)
+
+        # Create a vertical BoxLayout for buttons
+        buttons_layout = BoxLayout(orientation='vertical', size_hint=(1, 0.1), spacing=10)
+        self.add_buttons(buttons_layout)
+        layout.add_widget(buttons_layout)
+
+        self.status_label = Label(text="Welcome! Please setup the environment first.", size_hint=(1, 0.2), text_size=(None, None))
+        layout.add_widget(self.status_label)
+
+    def add_buttons(self, buttons_layout):
+        """Add buttons to the layout in two rows."""
+        row1_layout = BoxLayout(orientation='horizontal', size_hint=(1, None), height='40dp', spacing=10)
+        row2_layout = BoxLayout(orientation='horizontal', size_hint=(1, None), height='40dp', spacing=10)
+
+        row1_layout.add_widget(Button(text="Clear Code", size_hint=(0.3, 1), background_color=(1, 0.3, 0.3, 1), on_press=self.clear_text))
+        row1_layout.add_widget(Button(text="Setup Environment", size_hint=(0.4, 1), background_color=(0.3, 0.3, 1, 1), on_press=self.setup_environment))
+        row2_layout.add_widget(Button(text="Convert to APK", size_hint=(1, 1), background_color=(0.3, 0.7, 0.3, 1), on_press=self.start_conversion))
+
+        buttons_layout.add_widget(row1_layout)
+        buttons_layout.add_widget(row2_layout)
+
+    def update_progress(self, value):
+        """Update the progress bar."""
+        self.progress_value = value
+        self.progress_bar.value = value
+
+    def update_status(self, text):
+        """Update status label."""
+        def update(*args):
+            self.status_label.text = text
+        Clock.schedule_once(update, 0)
+
+    def log_error(self, error_message):
+        """Log detailed errors to a file."""
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(self.log_dir, f"error_{timestamp}.log")
+
+        with open(log_file, "w") as f:
+            f.write(f"Timestamp: {timestamp}\nError: {error_message}\n")
+            f.write("\nSystem Information:\n")
+            f.write(f"OS: {platform.system()} {platform.release()}\n")
+            f.write(f"Python: {sys.version}\n")
+            f.write(f"Environment Variables: {os.environ}\n")
+
+        self.update_status(f"Error log saved to: {log_file}")
+
+    def clear_text(self, instance):
+        """Clear all input fields."""
+        self.code_input.text = ""
+        self.app_name_input.text = ""
+        self.status_label.text = "Cleared all inputs"
+        self.progress_bar.value = 0
+
+    def check_internet_connection(self):
+        """Check if there is an active internet connection."""
+        try:
+            urllib.request.urlopen('http://google.com', timeout=3)
+            self.internet_available = True
+            return True
+        except Exception as e:
+            self.internet_available = False
+            self.log_error(f"Internet connection check failed: {e}")
+            return False
+
+    def start_conversion(self, instance):
+        """Start the conversion process."""
+        if not self.code_input.text.strip():
+            self.update_status("Please enter your code first")
+            return
+
+        if not self.system_ready:
+            self.update_status("Please setup the environment first")
+            return
+
+        self.update_status("Creating project...")
+        self.progress_bar.value = 0
+
+        try:
+            project_dir = self.create_project_files()
+            threading.Thread(target=self.convert_process, args=(project_dir,)).start()
+        except Exception as e:
+            self.log_error(str(e))
+            self.status_label.text = f"Error: {str(e)}"
+
+    def create_project_files(self):
+        app_name = self.app_name_input.text.strip() or "MyPythonApp"
+        package_name = "".join(c.lower() for c in app_name if c.isalnum())
+        project_dir = os.path.join(self.base_dir, f"py2apk_{package_name}")
+        os.makedirs(project_dir, exist_ok=True)
+
+        # Write the main Python code
+        with open(os.path.join(project_dir, "main.py"), "w", encoding="utf-8") as f:
+            f.write(self.code_input.text)
+
+        # Create buildozer.spec file
+        required_packages = self.analyze_imports(self.code_input.text)
+        buildozer_spec = f"""[app]
+title = {app_name}
+package.name = {package_name}
+package.domain = org.test
+source.dir = .
+source.include_exts = py,png,jpg,kv,atlas,json
+version = 1.0
+requirements = python3,kivy,{','.join(required_packages)}
+orientation = portrait,landscape
+fullscreen = 0
+android.permissions = INTERNET,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+android.api = 29
+android.minapi = 21
+android.sdk = 29
+android.ndk = 19b
+android.private_storage = True
+android.accept_sdk_license = True
+android.arch = armeabi-v7a
+p4a.branch = master
+android.setup_kwargs = --enable-androidx
+"""
+        with open(os.path.join(project_dir, "buildozer.spec"), "w") as f:
+            f.write(buildozer_spec)
+
+        return project_dir
+
+    def analyze_imports(self, code):
+        """Analyze code to discover imported libraries."""
+        required_packages = set()
+        try:
+            tree = ast.parse(code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        required_packages.add(alias.name.split('.')[0])
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        required_packages.add(node.module.split('.')[0])
+        except Exception as e:
+            self.log_error(f"Error analyzing imports: {e}")
+
+        stdlib_modules = set(sys.stdlib_module_names)
+        return required_packages - stdlib_modules
+
+    def convert_process(self, project_dir):
+        """Handle the conversion process of Python code to APK."""
+        if not self.system_ready:
+            if not self.setup_environment():
+                self.update_status("Environment setup not completed. Please setup first.")
+                return
+        
+        self.update_status("Installing Buildozer...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'buildozer'])
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'cython'])
+
+        self.update_status("Starting build process...")
+        build_log = os.path.join(self.log_dir, 'buildozer_log.txt')
+
+        with open(build_log, 'w') as log_file:
+            build_process = subprocess.Popen(
+                ['buildozer', 'android', 'debug'],
+                cwd=project_dir,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True
+            )
+
+            build_process.wait()
+
+        if build_process.returncode == 0:
+            self.update_status("APK creation successful!")
+        else:
+            with open(build_log, 'r') as log_file:
+                error_details = log_file.read()
+                self.log_error(f"Build failed:\n{error_details}")
+                self.update_status("APK creation failed. Check logs.")
+
+    def setup_environment(self, instance=None):
+        """Setup the environment for APK conversion."""
+        try:
+            self.update_status("Setting up environment...")
+            self.update_progress(10)
+
+            if sys.version_info < (3, 7):
+                self.update_status("Error: Python 3.7 or higher is required")
+                return
+
+            if not self.check_internet_connection():
+                self.update_status("Warning: No internet connection detected")
+                return
+
+            if not self.install_android_sdk() or not self.install_android_ndk():
+                self.update_status("Failed to install Android SDK or NDK")
+                return
+
+            missing_reqs = self.check_system_requirements()
+            if missing_reqs:
+                self.handle_missing_requirements(missing_reqs)
+
+            self.system_ready = True
+            self.update_status("Environment setup completed successfully!")
+            self.update_progress(100)
+            return True
+
+        except Exception as e:
+            self.log_error(f"Environment setup error: {e}")
+            self.update_status(f"Setup failed: {e}")
+            return False
+
+    def get_system_requirements(self):
+        """Get system requirements based on the operating system."""
+        if platform.system() == 'Linux':
+            return [
+                'wget', 'git', 'zip', 'unzip', 'openjdk-11-jdk',
+                'autoconf', 'automake', 'libtool', 'python3-pip',
+                'python3-dev', 'build-essential', 'ccache'
+            ]
+        elif platform.system() == 'Windows':
+            return ['git', 'zip', 'unzip', 'java']
+        return []
+
+    def check_system_requirements(self):
+        """Check for system requirements."""
+        missing_reqs = []
+        for req in self.get_system_requirements():
+            try:
+                subprocess.check_output(['which', req], stderr=subprocess.STDOUT)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                missing_reqs.append(req)
+        return missing_reqs
+
+    def handle_missing_requirements(self, missing_reqs):
+        """Handle missing system requirements."""
+        self.update_status(f"Missing requirements: {', '.join(missing_reqs)}")
+        if platform.system() == 'Linux':
+            try:
+                self.update_status("Installing missing requirements...")
+                subprocess.run(['sudo', 'apt-get', 'install', '-y'] + missing_reqs)
+            except Exception as e:
+                self.update_status(f"Error installing requirements: {e}")
+        else:
+            self.update_status("Please install missing requirements manually")
+
+    def install_android_sdk(self):
+        """Install Android SDK if not already installed."""
+        sdk_tools_url = "https://dl.google.com/android/repository/commandlinetools-linux-6609375_latest.zip"
+        sdk_tools_zip = os.path.join(self.sdk_dir, "sdk-tools.zip")
+
+        if os.path.exists(os.path.join(self.sdk_dir, "tools")):
+            self.update_status("Android SDK is already installed.")
+            return True
+
+        if not self.download_file(sdk_tools_url, sdk_tools_zip):
+            self.update_status("Failed to download Android SDK tools.")
+            return False
+
+        if not self.extract_zip(sdk_tools_zip, self.sdk_dir):
+            self.update_status("Failed to extract Android SDK tools.")
+            return False
+
+        self.cleanup_zip(sdk_tools_zip)
+
+        os.environ['ANDROID_SDK_ROOT'] = self.sdk_dir
+        os.environ['PATH'] += os.pathsep + os.path.join(self.sdk_dir, "tools", "bin")
+
+        return self.accept_sdk_licenses()
+
+    def cleanup_zip(self, zip_path):
+        """Delete the zip file after extraction."""
+        try:
+            os.remove(zip_path)
+        except Exception as e:
+            self.log_error(f"Failed to delete zip file: {e}")
+
+    def accept_sdk_licenses(self):
+        """Accept Android SDK licenses."""
+        try:
+            self.update_status("Accepting Android SDK licenses...")
+            subprocess.run(["sdkmanager", "--licenses"], input="y\n", text=True, check=True)
+            self.update_status("Android SDK licenses accepted.")
+            return self.install_sdk_packages()
+        except Exception as e:
+            self.log_error(f"Failed to accept SDK licenses: {e}")
+            return False
+
+    def install_sdk_packages(self):
+        """Install required SDK packages."""
+        try:
+            self.update_status("Installing required SDK packages...")
+            subprocess.run(["sdkmanager", "platform-tools", "platforms;android-29", "build-tools;29.0.3"], check=True)
+            self.update_status("Required SDK packages installed.")
+            return True
+        except Exception as e:
+            self.log_error(f"Failed to install SDK packages: {e}")
+            return False
+
+    def install_android_ndk(self):
+        """Install Android NDK if not already installed."""
+        ndk_url = "https://dl.google.com/android/repository/android-ndk-r19c-linux-x86_64.zip"
+        ndk_zip = os.path.join(self.ndk_dir, "android-ndk.zip")
+
+        if os.path.exists(os.path.join(self.ndk_dir, "android-ndk-r19c")):
+            self.update_status("Android NDK is already installed.")
+            return True
+
+        if not self.download_file(ndk_url, ndk_zip):
+            self.update_status("Failed to download Android NDK.")
+            return False
+
+        if not self.extract_zip(ndk_zip, self.ndk_dir):
+            self.update_status("Failed to extract Android NDK.")
+            return False
+
+        self.cleanup_zip(ndk_zip)
+
+        os.environ['ANDROID_NDK_HOME'] = os.path.join(self.ndk_dir, "android-ndk-r19c")
+        os.environ['PATH'] += os.pathsep + os.path.join(self.ndk_dir, "android-ndk-r19c")
+
+        return True
+
+if __name__ == '__main__':
+    ConverterApp().run()
